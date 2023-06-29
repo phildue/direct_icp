@@ -6,11 +6,12 @@ Implementation of direct image alignment of two RGBD frames, minimizing photomet
 ```
 docker build . -t direct_icp
 ```
-2. Start interactive session
+2. Start interactive session with persistent data folder e.g.:
 ```
-docker run -it --rm --user $(id -u):$(id -g) -v$(pwd):$(pwd) --workspace_dir $(pwd) direct_icp
+mkdir data
+docker run -it --rm -v$(pwd)/data:/opt/direct_icp/data direct_icp
 ```
-3. Follow steps as in (#Run)
+3. Follow steps as in [Run](#Run)
 
 # Build & Run (native)
 1. Install dependencies

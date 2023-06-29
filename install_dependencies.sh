@@ -1,6 +1,7 @@
 #!/bin/bash
 
-apt-get update && apt-get -y --no-install-recommends install \
+apt-get update
+apt-get -y --no-install-recommends install \
     build-essential \
     clang \
     cmake \
@@ -12,7 +13,6 @@ apt-get update && apt-get -y --no-install-recommends install \
     curl \
     git \
     libopencv-dev
-
 curl https://bootstrap.pypa.io/pip/2.7/get-pip.py -o get-pip.py && python2.7 get-pip.py
 
 pip install numpy    
