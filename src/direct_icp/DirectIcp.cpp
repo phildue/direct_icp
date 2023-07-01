@@ -4,7 +4,9 @@
 #include <numeric>
 
 #include "DirectIcp.h"
-#include "core/random.h"
+
+#include "keypoint_selection/keypoint_selection.h"
+
 
 namespace vslam
 {
@@ -85,7 +87,9 @@ Pose DirectIcp::computeEgomotion(
         motion = SE3f();
         break;
       }
+
       _weightFunction->computeWeights(constraintsValid);
+
 
       NormalEquations ne = computeNormalEquations(constraintsValid);
 
@@ -120,47 +124,43 @@ std::vector<DirectIcp::Constraint::ShPtr> DirectIcp::selectConstraintsAndPrecomp
   const cv::Mat & dI = frame->dI(_level);
   const cv::Mat & dZ = frame->dZ(_level);
 
-  std::vector<int> vs(intensity.rows);
-  for (int v = 0; v < intensity.rows; v++) {
-    vs[v] = v;
-  }
-  //TODO this could be a transform_reduce:
-  // ( transform: (uv) -> (vector<vector<Constraint>>) | accumulate: vector<vector<Constraint>> -> (vector<Constraint>))
-  std::vector<std::vector<Constraint::ShPtr>> cs(intensity.rows);
-  std::transform(std::execution::par_unseq, vs.begin(), vs.end(), cs.begin(), [&](int v) {
-    const float * zv = depth.ptr<float>(v);
-    const uint8_t * iv = intensity.ptr<uint8_t>(v);
-    const cv::Vec2f * dIv = dI.ptr<cv::Vec2f>(v);
-    const cv::Vec2f * dZv = dZ.ptr<cv::Vec2f>(v);
-    std::vector<Constraint::ShPtr> constraints;
-    constraints.reserve(intensity.cols);
-    for (int u = 0; u < intensity.cols; u++) {
-      if (
-        std::isfinite(zv[u]) && std::isfinite(dZv[u][0]) && std::isfinite(dZv[u][1]) && 0 < zv[u] &&
-        zv[u] < _maxDepth && std::abs(dZv[u][0]) < _maxGradientDepth &&
-        std::abs(dZv[u][1]) < _maxGradientDepth &&
-        (std::abs(dIv[u][0]) > _minGradientIntensity ||
-         std::abs(dIv[u][1]) > _minGradientIntensity || std::abs(dZv[u][0]) > _minGradientDepth ||
-         std::abs(dZv[u][1]) > _minGradientDepth)) {
-        auto c = std::make_shared<Constraint>();
-        c->idx = constraints.size();
-        c->uv0 = Vec2f(u, v);
-        c->iz0 = Vec2f(iv[u], zv[u]);
+  std::vector<Vec2d> uv = keypoint::select(frame, _level, [&](const Vec2d & uv) {
+    const float z = depth.at<float>(uv(1), uv(0));
+    const cv::Vec2f dIuv = dI.at<cv::Vec2f>(uv(1), uv(0));
+    const cv::Vec2f dZuv = dZ.at<cv::Vec2f>(uv(1), uv(0));
+    return std::isfinite(z) && std::isfinite(dZuv[0]) && std::isfinite(dZuv[1]) && 0 < z &&
+           z < _maxDepth && std::abs(dZuv[0]) < _maxGradientDepth &&
+           std::abs(dZuv[1]) < _maxGradientDepth &&
+           (std::abs(dIuv[0]) > _minGradientIntensity ||
+            std::abs(dIuv[1]) > _minGradientIntensity || std::abs(dZuv[0]) > _minGradientDepth ||
+            std::abs(dZuv[1]) > _minGradientDepth);
+  });
 
-        c->p0 = frame->p3d(v, u, _level).cast<float>();
-        Mat<float, 2, 6> Jw = computeJacobianWarp(motion * c->p0, frame->camera(_level));
-        c->J.row(0) = dIv[u][0] * Jw.row(0) + dIv[u][1] * Jw.row(1);
-        c->JZJw = dZv[u][0] * Jw.row(0) + dZv[u][1] * Jw.row(1);
-        constraints.push_back(c);
-      }
-    }
-    return constraints;
-  });
-  std::vector<Constraint::ShPtr> constraints;
-  std::for_each(cs.begin(), cs.end(), [&](auto c) {
-    constraints.insert(constraints.end(), c.begin(), c.end());
-  });
-  return uniformSubselection(frame->camera(_level), constraints);
+  std::vector<Constraint::ShPtr> constraints(uv.size());
+  std::transform(
+    std::execution::par_unseq, uv.begin(), uv.end(), constraints.begin(),
+    [&](const Vec2d & uv) -> Constraint::ShPtr {
+      const float z = depth.at<float>(uv(1), uv(0));
+      const float i = intensity.at<uint8_t>(uv(1), uv(0));
+
+      const cv::Vec2f dIuv = dI.at<cv::Vec2f>(uv(1), uv(0));
+      const cv::Vec2f dZuv = dZ.at<cv::Vec2f>(uv(1), uv(0));
+      auto c = std::make_unique<Constraint>();
+      c->uv0 = uv.cast<float>();
+      c->iz0 = Vec2f(i, z);
+
+      c->p0 = frame->p3d(uv(1), uv(0), _level).cast<float>();
+      Mat<float, 2, 6> Jw = computeJacobianWarp(motion * c->p0, frame->camera(_level));
+      c->J.row(0) = dIuv[0] * Jw.row(0) + dIuv[1] * Jw.row(1);
+      c->JZJw = dZuv[0] * Jw.row(0) + dZuv[1] * Jw.row(1);
+      return c;
+    });
+
+  constraints = keypoint::subsampling::uniform(
+    constraints, frame->height(_level), frame->width(_level), _maxPoints,
+    [](auto c) { return c->uv0; });
+
+  return constraints;
 }
 Matf<2, 6> DirectIcp::computeJacobianWarp(const Vec3f & p, Camera::ConstShPtr cam) const
 {
@@ -306,27 +306,6 @@ Vec2f DirectIcp::interpolate(
   return izw;
 }
 
-std::vector<DirectIcp::Constraint::ShPtr> DirectIcp::uniformSubselection(
-  Camera::ConstShPtr cam, const std::vector<DirectIcp::Constraint::ShPtr> & interestPoints) const
-{
-  const size_t nNeeded = std::max<size_t>(20, _maxPoints);
-  std::vector<bool> mask(cam->width() * cam->height(), false);
-  std::vector<Constraint::ShPtr> subset;
-  subset.reserve(interestPoints.size());
-  if (nNeeded < interestPoints.size()) {
-    while (subset.size() < nNeeded) {
-      auto ip = interestPoints[random::U(0, interestPoints.size() - 1)];
-      const size_t idx = ip->uv0(1) * cam->width() + ip->uv0(0);
-      if (!mask[idx]) {
-        subset.push_back(ip);
-        mask[idx] = true;
-      }
-    }
-    return subset;
-  }
-  return interestPoints;
-}
-
 DirectIcp::TDistributionBivariate::TDistributionBivariate(
   double dof, double precision, int maxIterations)
 : _dof(dof), _precision(precision), _maxIterations(maxIterations)
@@ -343,6 +322,7 @@ void DirectIcp::TDistributionBivariate::computeWeights(
   }
 
   for (int i = 0; i < _maxIterations; i++) {
+
     std::vector<Mat2f> wrrT(features.size());
     for (size_t n = 0; n < features.size(); n++) {
       wrrT[n] = weights(n) * rrT[n];

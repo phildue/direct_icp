@@ -73,7 +73,7 @@ public:
   DirectIcp(
     int nLevels = 4, double minGradientIntensity = 5, double minGradientDepth = INFd,
     double maxGradientDepth = 0.3, double maxZ = 5.0, double maxIterations = 100,
-    double minParameterUpdate = 1e-4, double maxErrorIncrease = 1.1, int maxPoints = INFi);
+    double minParameterUpdate = 1e-4, double maxErrorIncrease = 1.1, int maxPoints = 640 * 480);
 
   Pose computeEgomotion(
     Camera::ConstShPtr cam, const cv::Mat & intensity0, const cv::Mat & depth0,
@@ -107,8 +107,6 @@ private:
 
   Vec6f computeJacobianSE3z(const Vec3f & p) const;
   Vec2f interpolate(const cv::Mat & intensity, const cv::Mat & depth, const Vec2f & uv) const;
-  std::vector<Constraint::ShPtr> uniformSubselection(
-    Camera::ConstShPtr cam, const std::vector<Constraint::ShPtr> & features) const;
 };
 
 }  // namespace vslam
